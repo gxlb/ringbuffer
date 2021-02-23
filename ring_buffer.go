@@ -5,6 +5,7 @@ import (
 	"runtime"
 	"sync"
 	"sync/atomic"
+	"time"
 )
 
 func NewRingBuffer(size int) *RingBuffer {
@@ -24,6 +25,8 @@ type BufferId uint64
 //   http://ifeve.com/ringbuffer
 //   http://mechanitis.blogspot.com/2011/06/dissecting-disruptor-whats-so-special.html
 type RingBuffer struct {
+	debug      bool
+	totalWait  int64
 	size       int        // buffer size, readonly
 	waitReader *sync.Cond // waitlist that are wating read
 	waitWriter *sync.Cond // waitlist that are wating write
@@ -33,24 +36,20 @@ type RingBuffer struct {
 	wCommit    uint64     // Write commit, mutable
 }
 
-//check conflict between goroutines
-type checkConflict struct {
-	addr *uint64
-	val  uint64
+func (rb *RingBuffer) Debug(enable bool) {
+	rb.debug = enable
 }
 
-func (cc *checkConflict) init(addr *uint64, val uint64) *checkConflict {
-	cc.addr = addr
-	cc.val = val
-	return cc
-}
-
-// do not use pointer receiver to escape to heap
-// This function is used for runtime to check the block condition.
-func (cc checkConflict) needblock() bool {
-	ld := atomic.LoadUint64(cc.addr)
-	block := ld < cc.val
-	return block
+func (rb *RingBuffer) log(name string) func() {
+	start := time.Now()
+	fmt.Printf("%s %s start\n", start, name)
+	deferFun := func() {
+		end := time.Now()
+		cost := end.Sub(start)
+		totalCost := atomic.AddInt64(&rb.totalWait, int64(cost))
+		fmt.Printf("%s %s end, cost=%s totalCost=%s\n", start, name, cost, time.Duration(totalCost))
+	}
+	return deferFun
 }
 
 // Init ringbuffer with size.
@@ -86,6 +85,10 @@ func (rb *RingBuffer) BufferIndex(id uint64) int {
 func (rb *RingBuffer) ReserveW() (id uint64) {
 	id = atomic.AddUint64(&rb.wReserve, 1) - 1
 
+	if rb.debug {
+		fn := rb.log("ReserveW")
+		defer fn()
+	}
 	for {
 		dataStart := atomic.LoadUint64(&rb.rCommit)
 		maxW := dataStart + uint64(rb.size)
@@ -109,9 +112,13 @@ func (rb *RingBuffer) ReserveW() (id uint64) {
 func (rb *RingBuffer) CommitW(id uint64) {
 	newId := id + 1
 
+	if rb.debug {
+		fn := rb.log("CommitW")
+		defer fn()
+	}
 	for {
 		if atomic.CompareAndSwapUint64(&rb.wCommit, id, newId) { //commit OK
-			rb.waitReader.Signal() //wakeup reader
+			rb.waitReader.Broadcast() //wakeup reader
 			break
 		}
 
@@ -128,6 +135,10 @@ func (rb *RingBuffer) CommitW(id uint64) {
 func (rb *RingBuffer) ReserveR() (id uint64) {
 	id = atomic.AddUint64(&rb.rReserve, 1) - 1
 
+	if rb.debug {
+		fn := rb.log("ReserveR")
+		defer fn()
+	}
 	for {
 		w := atomic.LoadUint64(&rb.wCommit)
 		if id < w { //no conflict, reserve ok
@@ -150,9 +161,13 @@ func (rb *RingBuffer) ReserveR() (id uint64) {
 func (rb *RingBuffer) CommitR(id uint64) {
 	newId := id + 1
 
+	if rb.debug {
+		fn := rb.log("CommitR")
+		defer fn()
+	}
 	for {
 		if atomic.CompareAndSwapUint64(&rb.rCommit, id, newId) {
-			rb.waitWriter.Signal() //wakeup writer
+			rb.waitWriter.Broadcast() //wakeup writer
 			break
 		}
 
