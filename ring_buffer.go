@@ -28,8 +28,10 @@ type RingBuffer struct {
 	debug      bool
 	totalWait  int64
 	size       int        // buffer size, readonly
-	waitReader *sync.Cond // waitlist that are wating read
-	waitWriter *sync.Cond // waitlist that are wating write
+	waitReadR  *sync.Cond // waitlist that are wating read
+	waitWriteR *sync.Cond // waitlist that are wating write
+	waitReadC  *sync.Cond // waitlist that are wating read commit
+	waitWriteC *sync.Cond // waitlist that are wating write commit
 	rReserve   uint64     // Read reserve, mutable
 	rCommit    uint64     // Read commit, mutable
 	wReserve   uint64     // Write reserve, mutable
@@ -64,8 +66,10 @@ func (rb *RingBuffer) init(size int) error {
 		return fmt.Errorf("RingBuffer: invalid size %d", size)
 	}
 	rb.size = size
-	rb.waitReader = sync.NewCond(new(sync.Mutex))
-	rb.waitWriter = sync.NewCond(new(sync.Mutex))
+	rb.waitReadR = sync.NewCond(new(sync.Mutex))
+	rb.waitWriteR = sync.NewCond(new(sync.Mutex))
+	rb.waitReadC = sync.NewCond(new(sync.Mutex))
+	rb.waitWriteC = sync.NewCond(new(sync.Mutex))
 	return nil
 }
 
@@ -79,17 +83,33 @@ func (rb *RingBuffer) BufferIndex(id uint64) int {
 	return int(id % uint64(rb.size))
 }
 
+func (rb *RingBuffer) Show() string {
+	return fmt.Sprintf("rR=%d rC=%d wR=%d wC=%d",
+		atomic.LoadUint64(&rb.rReserve),
+		atomic.LoadUint64(&rb.rCommit),
+		atomic.LoadUint64(&rb.wReserve),
+		atomic.LoadUint64(&rb.wCommit),
+	)
+}
+
 // ReserveW returns next avable id for write.
 // It will wait if ringbuffer is full.
 // It is goroutine-safe.
-func (rb *RingBuffer) ReserveW() (id uint64) {
+func (rb *RingBuffer) ReserveW(wid int) (id uint64) {
 	id = atomic.AddUint64(&rb.wReserve, 1) - 1
 
 	if rb.debug {
 		fn := rb.log("ReserveW")
 		defer fn()
 	}
+
+	try := 0
 	for {
+		try++
+		if rb.debug {
+			fmt.Printf("ReserveW try=%d wid=%d %s\n", try, wid, rb.Show())
+		}
+
 		dataStart := atomic.LoadUint64(&rb.rCommit)
 		maxW := dataStart + uint64(rb.size)
 		if id < maxW { //no conflict, reserve ok
@@ -97,9 +117,9 @@ func (rb *RingBuffer) ReserveW() (id uint64) {
 		}
 
 		//buffer full, wait as writer in order to awake by another reader
-		rb.waitWriter.L.Lock()
-		rb.waitWriter.Wait()
-		rb.waitWriter.L.Unlock()
+		rb.waitWriteR.L.Lock()
+		rb.waitWriteR.Wait()
+		rb.waitWriteR.L.Unlock()
 	}
 
 	return
@@ -109,46 +129,61 @@ func (rb *RingBuffer) ReserveW() (id uint64) {
 // It will wait if previous writer id havn't commit.
 // It will awake on reader wait list after commit OK.
 // It is goroutine-safe.
-func (rb *RingBuffer) CommitW(id uint64) {
+func (rb *RingBuffer) CommitW(wid int, id uint64) {
 	newId := id + 1
 
 	if rb.debug {
 		fn := rb.log("CommitW")
 		defer fn()
 	}
+
+	try := 0
 	for {
+		try++
+		if rb.debug {
+			fmt.Printf("CommitW try=%d wid=%d %s\n", try, wid, rb.Show())
+		}
+
 		if atomic.CompareAndSwapUint64(&rb.wCommit, id, newId) { //commit OK
-			rb.waitReader.Broadcast() //wakeup reader
+			rb.waitReadR.Broadcast()  //wakeup reader
+			rb.waitWriteC.Broadcast() //wakeup write committer
 			break
 		}
 
 		//commit fail, wait as reader in order to wakeup by another writer
-		rb.waitReader.L.Lock()
-		rb.waitReader.Wait()
-		rb.waitReader.L.Unlock()
+		rb.waitWriteC.L.Lock()
+		rb.waitWriteC.Wait()
+		rb.waitWriteC.L.Unlock()
 	}
 }
 
 // ReserveR returns next avable id for read.
 // It will wait if ringbuffer is empty.
 // It is goroutine-safe.
-func (rb *RingBuffer) ReserveR() (id uint64) {
+func (rb *RingBuffer) ReserveR(wid int) (id uint64) {
 	id = atomic.AddUint64(&rb.rReserve, 1) - 1
 
 	if rb.debug {
 		fn := rb.log("ReserveR")
 		defer fn()
 	}
+
+	try := 0
 	for {
+		try++
+		if rb.debug {
+			fmt.Printf("ReserveR try=%d wid=%d %s\n", try, wid, rb.Show())
+		}
+
 		w := atomic.LoadUint64(&rb.wCommit)
 		if id < w { //no conflict, reserve ok
 			break
 		}
 
 		//buffer empty, wait as reader in order to wakeup by another writer
-		rb.waitReader.L.Lock()
-		rb.waitReader.Wait()
-		rb.waitReader.L.Unlock()
+		rb.waitReadR.L.Lock()
+		rb.waitReadR.Wait()
+		rb.waitReadR.L.Unlock()
 	}
 
 	return
@@ -158,22 +193,30 @@ func (rb *RingBuffer) ReserveR() (id uint64) {
 // It will wait if previous reader id havn't commit.
 // It will awake on writer wait list after commit OK.
 // It is goroutine-safe.
-func (rb *RingBuffer) CommitR(id uint64) {
+func (rb *RingBuffer) CommitR(wid int, id uint64) {
 	newId := id + 1
 
 	if rb.debug {
 		fn := rb.log("CommitR")
 		defer fn()
 	}
+
+	try := 0
 	for {
+		try++
+		if rb.debug {
+			fmt.Printf("CommitR try=%d wid=%d %s\n", try, wid, rb.Show())
+		}
+
 		if atomic.CompareAndSwapUint64(&rb.rCommit, id, newId) {
-			rb.waitWriter.Broadcast() //wakeup writer
+			rb.waitReadC.Broadcast()  //wakeup read committer
+			rb.waitWriteR.Broadcast() //wakeup writer
 			break
 		}
 
 		//commit fail, wait as writer in order to wakeup by another reader
-		rb.waitWriter.L.Lock()
-		rb.waitWriter.Wait()
-		rb.waitWriter.L.Unlock()
+		rb.waitReadC.L.Lock()
+		rb.waitReadC.Wait()
+		rb.waitReadC.L.Unlock()
 	}
 }

@@ -9,11 +9,12 @@ import (
 )
 
 var (
-	bufferSize  = 10
-	maxId       = uint64(bufferSize * 100)
-	workerCount = 5
+	bufferSize  = 1000
+	maxId       = uint64(bufferSize * 1000)
+	workerCount = 10
 	wg          sync.WaitGroup
 	rb          = ringbuffer.NewRingBuffer(bufferSize)
+	debug       = true
 )
 
 func main() {
@@ -21,7 +22,7 @@ func main() {
 	cpus := runtime.NumCPU()
 	runtime.GOMAXPROCS(cpus)
 	fmt.Printf("%s start, cpus=%d workerCount=%d bufferSize=%d maxId=%d\n", start, cpus, workerCount, bufferSize, maxId)
-	rb.Debug(true)
+	rb.Debug(debug)
 	wg.Add(workerCount * 2)
 	for i := 0; i < workerCount; i++ {
 		go writer(i + 1)
@@ -30,7 +31,7 @@ func main() {
 	wg.Wait()
 	end := time.Now()
 	cost := end.Sub(start)
-	expect := (time.Duration(maxId) + time.Duration(workerCount)) * 2 * time.Millisecond
+	expect := (time.Duration(maxId) + time.Duration(workerCount)) * 2 * time.Millisecond / 10
 	fmt.Printf("%s~%s cpus=%d cost %s/%s\n", start, end, cpus, cost, expect)
 }
 
@@ -39,7 +40,7 @@ func delay(id int) {
 	for i := 0; i < id; i++ {
 		for j := 0; j < id; j++ {
 			for k := 0; k < id; k++ {
-				x += (i + 2) * (j + 2) * (k + 2)
+				x *= (i + 2) * (j + 2) * (k + 2)
 			}
 		}
 	}
@@ -47,11 +48,21 @@ func delay(id int) {
 
 func reader(wid int) {
 	for {
-		id := rb.ReserveR()
-		fmt.Printf("reader %d hold %d\n", wid, id)
+		if debug {
+			fmt.Printf("reader wid=%d try hold\n", wid)
+		}
+		id := rb.ReserveR(wid)
+		if debug {
+			fmt.Printf("reader wid=%d hold %d\n", wid, id)
+		}
 		delay(wid)
-		rb.CommitR(id)
-		fmt.Printf("reader %d commit %d\n", wid, id)
+		if debug {
+			fmt.Printf("reader wid=%d try commit %d\n", wid, id)
+		}
+		rb.CommitR(wid, id)
+		if debug {
+			fmt.Printf("reader wid=%d commit %d\n", wid, id)
+		}
 		if id > maxId {
 			break
 		}
@@ -61,11 +72,22 @@ func reader(wid int) {
 
 func writer(wid int) {
 	for {
-		id := rb.ReserveW()
-		fmt.Printf("writer %d hold %d\n", wid, id)
+		if debug {
+			fmt.Printf("writer wid=%d try hold\n", wid)
+		}
+		id := rb.ReserveW(wid)
+		if debug {
+			fmt.Printf("writer wid=%d hold %d\n", wid, id)
+		}
+
 		delay(wid)
-		rb.CommitW(id)
-		fmt.Printf("writer %d commit %d\n", wid, id)
+		if debug {
+			fmt.Printf("writer wid=%d try commit %d\n", wid, id)
+		}
+		rb.CommitW(wid, id)
+		if debug {
+			fmt.Printf("writer wid=%d commit %d\n", wid, id)
+		}
 		if id > maxId {
 			break
 		}
