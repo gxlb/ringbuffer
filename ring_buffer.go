@@ -44,7 +44,7 @@ func (rb *RingBuffer) Debug(enable bool) {
 
 func (rb *RingBuffer) log(name string) func() {
 	start := time.Now()
-	fmt.Printf("%s %s start\n", start, name)
+	//fmt.Printf("%s %s start\n", start, name)
 	deferFun := func() {
 		end := time.Now()
 		cost := end.Sub(start)
@@ -84,7 +84,8 @@ func (rb *RingBuffer) BufferIndex(id uint64) int {
 }
 
 func (rb *RingBuffer) Show() string {
-	return fmt.Sprintf("rR=%d rC=%d wR=%d wC=%d",
+	return fmt.Sprintf("%s rR=%d rC=%d wR=%d wC=%d",
+		time.Now().Format("2006-01-02T15:04:05.999999999"),
 		atomic.LoadUint64(&rb.rReserve),
 		atomic.LoadUint64(&rb.rCommit),
 		atomic.LoadUint64(&rb.wReserve),
@@ -92,14 +93,14 @@ func (rb *RingBuffer) Show() string {
 	)
 }
 
-// ReserveW returns next avable id for write.
+// ReserveWrite returns next avable id for write.
 // It will wait if ringbuffer is full.
 // It is goroutine-safe.
-func (rb *RingBuffer) ReserveW(wid int) (id uint64) {
+func (rb *RingBuffer) ReserveWrite(wid int) (id uint64) {
 	id = atomic.AddUint64(&rb.wReserve, 1) - 1
 
 	if rb.debug {
-		fn := rb.log("ReserveW")
+		fn := rb.log("ReserveWrite")
 		defer fn()
 	}
 
@@ -107,7 +108,7 @@ func (rb *RingBuffer) ReserveW(wid int) (id uint64) {
 	for {
 		try++
 		if rb.debug {
-			fmt.Printf("ReserveW try=%d wid=%d %s\n", try, wid, rb.Show())
+			fmt.Printf("ReserveWrite try=%d wid=%d %s\n", try, wid, rb.Show())
 		}
 
 		dataStart := atomic.LoadUint64(&rb.rCommit)
@@ -125,15 +126,15 @@ func (rb *RingBuffer) ReserveW(wid int) (id uint64) {
 	return
 }
 
-// CommitW commit writer event for id.
+// CommitWrite commit writer event for id.
 // It will wait if previous writer id havn't commit.
 // It will awake on reader wait list after commit OK.
 // It is goroutine-safe.
-func (rb *RingBuffer) CommitW(wid int, id uint64) {
+func (rb *RingBuffer) CommitWrite(wid int, id uint64) {
 	newId := id + 1
 
 	if rb.debug {
-		fn := rb.log("CommitW")
+		fn := rb.log("CommitWrite")
 		defer fn()
 	}
 
@@ -141,7 +142,7 @@ func (rb *RingBuffer) CommitW(wid int, id uint64) {
 	for {
 		try++
 		if rb.debug {
-			fmt.Printf("CommitW try=%d wid=%d %s\n", try, wid, rb.Show())
+			fmt.Printf("CommitWrite try=%d wid=%d %s\n", try, wid, rb.Show())
 		}
 
 		if atomic.CompareAndSwapUint64(&rb.wCommit, id, newId) { //commit OK
@@ -157,14 +158,14 @@ func (rb *RingBuffer) CommitW(wid int, id uint64) {
 	}
 }
 
-// ReserveR returns next avable id for read.
+// ReserveRead returns next avable id for read.
 // It will wait if ringbuffer is empty.
 // It is goroutine-safe.
-func (rb *RingBuffer) ReserveR(wid int) (id uint64) {
+func (rb *RingBuffer) ReserveRead(wid int) (id uint64) {
 	id = atomic.AddUint64(&rb.rReserve, 1) - 1
 
 	if rb.debug {
-		fn := rb.log("ReserveR")
+		fn := rb.log("ReserveRead")
 		defer fn()
 	}
 
@@ -172,7 +173,7 @@ func (rb *RingBuffer) ReserveR(wid int) (id uint64) {
 	for {
 		try++
 		if rb.debug {
-			fmt.Printf("ReserveR try=%d wid=%d %s\n", try, wid, rb.Show())
+			fmt.Printf("ReserveRead try=%d wid=%d %s\n", try, wid, rb.Show())
 		}
 
 		w := atomic.LoadUint64(&rb.wCommit)
@@ -189,15 +190,15 @@ func (rb *RingBuffer) ReserveR(wid int) (id uint64) {
 	return
 }
 
-// CommitR commit reader event for id.
+// CommitRead commit reader event for id.
 // It will wait if previous reader id havn't commit.
 // It will awake on writer wait list after commit OK.
 // It is goroutine-safe.
-func (rb *RingBuffer) CommitR(wid int, id uint64) {
+func (rb *RingBuffer) CommitRead(wid int, id uint64) {
 	newId := id + 1
 
 	if rb.debug {
-		fn := rb.log("CommitR")
+		fn := rb.log("CommitRead")
 		defer fn()
 	}
 
@@ -205,12 +206,12 @@ func (rb *RingBuffer) CommitR(wid int, id uint64) {
 	for {
 		try++
 		if rb.debug {
-			fmt.Printf("CommitR try=%d wid=%d %s\n", try, wid, rb.Show())
+			fmt.Printf("CommitRead try=%d wid=%d %s\n", try, wid, rb.Show())
 		}
 
 		if atomic.CompareAndSwapUint64(&rb.rCommit, id, newId) {
-			rb.waitReadC.Broadcast()  //wakeup read committer
 			rb.waitWriteR.Broadcast() //wakeup writer
+			rb.waitReadC.Broadcast()  //wakeup read committer
 			break
 		}
 
